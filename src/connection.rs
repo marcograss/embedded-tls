@@ -18,7 +18,7 @@ use embedded_io_async::{Read as AsyncRead, Write as AsyncWrite};
 use crate::application_data::ApplicationData;
 use crate::buffer::CryptoBuffer;
 use digest::generic_array::typenum::Unsigned;
-use p256::ecdh::EphemeralSecret;
+use crate::key_exchange::EphemeralSecret;
 use signature::SignerMut;
 
 use crate::content_types::ContentType;
@@ -421,7 +421,7 @@ where
                 trace!("********* ServerHello");
                 let secret = handshake.secret.take().ok_or(TlsError::InvalidHandshake)?;
                 let shared = server_hello
-                    .calculate_shared_secret(&secret)
+                    .calculate_shared_secret(secret)
                     .ok_or(TlsError::InvalidKeyShare)?;
                 key_schedule.initialize_handshake_secret(shared.raw_secret_bytes())?;
                 Ok(State::ServerVerify)

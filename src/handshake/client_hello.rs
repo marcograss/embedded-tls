@@ -2,8 +2,6 @@ use core::marker::PhantomData;
 
 use digest::{Digest, OutputSizeUser};
 use heapless::Vec;
-use p256::EncodedPoint;
-use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::rand_core::RngCore;
 use typenum::Unsigned;
 
@@ -17,10 +15,11 @@ use crate::extensions::extension_data::psk_key_exchange_modes::{
 };
 use crate::extensions::extension_data::server_name::ServerNameList;
 use crate::extensions::extension_data::signature_algorithms::SignatureAlgorithms;
-use crate::extensions::extension_data::supported_groups::{NamedGroup, SupportedGroups};
+use crate::extensions::extension_data::supported_groups::SupportedGroups;
 use crate::extensions::extension_data::supported_versions::{SupportedVersionsClientHello, TLS13};
 use crate::extensions::messages::ClientHelloExtension;
 use crate::handshake::{LEGACY_VERSION, Random};
+use crate::key_exchange::EphemeralSecret;
 use crate::key_schedule::{HashOutputSize, WriteKeySchedule};
 use crate::{CryptoProvider, buffer::CryptoBuffer};
 
@@ -45,17 +44,25 @@ where
         let mut random = [0; 32];
         provider.rng().fill_bytes(&mut random);
 
+        // Use the first named group from config for key exchange
+        let preferred_group = config
+            .named_groups
+            .first()
+            .copied()
+            .unwrap_or(crate::extensions::extension_data::supported_groups::NamedGroup::Secp256r1);
+
         Self {
             config,
             random,
             cipher_suite: PhantomData,
-            secret: EphemeralSecret::random(&mut provider.rng()),
+            secret: EphemeralSecret::random(preferred_group, &mut provider.rng()),
         }
     }
 
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        let public_key = EncodedPoint::from(&self.secret.public_key());
-        let public_key = public_key.as_ref();
+        let mut pk_buf = [0u8; 128];
+        let public_key = self.secret.public_key_bytes(&mut pk_buf);
+        let group = self.secret.group();
 
         buf.push_u16(LEGACY_VERSION)
             .map_err(|_| TlsError::EncodeError)?;
@@ -66,10 +73,6 @@ where
         buf.push(0).map_err(|_| TlsError::EncodeError)?;
 
         // cipher suites (2+)
-        //buf.extend_from_slice(&((self.config.cipher_suites.len() * 2) as u16).to_be_bytes());
-        //for c in self.config.cipher_suites.iter() {
-        //buf.extend_from_slice(&(*c as u16).to_be_bytes());
-        //}
         buf.push_u16(2).map_err(|_| TlsError::EncodeError)?;
         buf.push_u16(CipherSuite::CODE_POINT)
             .map_err(|_| TlsError::EncodeError)?;
@@ -80,10 +83,6 @@ where
 
         // extensions (1+)
         buf.with_u16_length(|buf| {
-            // Section 4.2.1.  Supported Versions
-            // Implementations of this specification MUST send this extension in the
-            // ClientHello containing all versions of TLS which they are prepared to
-            // negotiate
             ClientHelloExtension::SupportedVersions(SupportedVersionsClientHello {
                 versions: Vec::from_slice(&[TLS13]).unwrap(),
             })
@@ -110,7 +109,7 @@ where
 
             ClientHelloExtension::KeyShare(KeyShareClientHello {
                 client_shares: Vec::from_slice(&[KeyShareEntry {
-                    group: NamedGroup::Secp256r1,
+                    group,
                     opaque: public_key,
                 }])
                 .unwrap(),
@@ -129,11 +128,6 @@ where
                 .encode(buf)?;
             }
 
-            // Section 4.2
-            // When multiple extensions of different types are present, the
-            // extensions MAY appear in any order, with the exception of
-            // "pre_shared_key" which MUST be the last extension in
-            // the ClientHello.
             if let Some((_, identities)) = &self.config.psk {
                 ClientHelloExtension::PreSharedKey(PreSharedKeyClientHello {
                     identities: identities.clone(),
@@ -154,25 +148,14 @@ where
         transcript: &mut CipherSuite::Hash,
         write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
     ) -> Result<(), TlsError> {
-        // Special case for PSK which needs to:
-        //
-        // 1. Add the client hello without the binders to the transcript
-        // 2. Create the binders for each identity using the transcript
-        // 3. Add the rest of the client hello.
-        //
-        // This causes a few issues since lengths must be correctly inside the payload,
-        // but won't actually be added to the record buffer until the end.
         if let Some((_, identities)) = &self.config.psk {
             let binders_len = identities.len() * (1 + HashOutputSize::<CipherSuite>::to_usize());
 
             let binders_pos = enc_buf.len() - binders_len;
 
-            // NOTE: Exclude the binders_len itself from the digest
             transcript.update(&enc_buf[0..binders_pos - 2]);
 
-            // Append after the client hello data. Sizes have already been set.
             let mut buf = CryptoBuffer::wrap(&mut enc_buf[binders_pos..]);
-            // Create a binder and encode for each identity
             for _id in identities {
                 let binder = write_key_schedule.create_psk_binder(transcript)?;
                 binder.encode(&mut buf)?;

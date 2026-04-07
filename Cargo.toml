@@ -23,6 +23,7 @@ hmac = "0.12.1"
 sha2 = { version = "0.10.2", default-features = false }
 aes-gcm = { version = "0.10.1", default-features = false, features = ["aes"] }
 chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"], optional = true }
 ed448-goldilocks = { version = "0.14.0-pre.11", default-features = false, features = ["signing"], optional = true }
 digest = { version = "0.10.3", default-features = false, features = [ "core-api" ] }
 typenum = { version = "1.15.0", default-features = false }
@@ -67,3 +68,4 @@ ed25519 = ["dep:ed25519-dalek", "rustpki"]
 ed448 = ["dep:ed448-goldilocks", "rustpki"]
 p384 = ["dep:p384", "rustpki"]
 chacha20poly1305 = ["dep:chacha20poly1305"]
+x25519 = ["dep:x25519-dalek"]

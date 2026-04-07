@@ -65,6 +65,7 @@ mod crypto_engine;
 mod extensions;
 pub mod flush_policy;
 mod handshake;
+pub(crate) mod key_exchange;
 mod key_schedule;
 mod parse_buffer;
 pub mod read_buffer;

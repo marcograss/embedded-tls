@@ -332,6 +332,8 @@ impl<'a> TlsConfig<'a> {
         unwrap!(config.signature_schemes.push(SignatureScheme::Ed25519).ok());
         unwrap!(config.signature_schemes.push(SignatureScheme::Ed448).ok());
 
+        #[cfg(feature = "x25519")]
+        unwrap!(config.named_groups.push(NamedGroup::X25519));
         unwrap!(config.named_groups.push(NamedGroup::Secp256r1));
 
         config
