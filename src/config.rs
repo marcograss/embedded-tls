@@ -7,6 +7,8 @@ use crate::extensions::extension_data::supported_groups::NamedGroup;
 pub use crate::handshake::certificate::{CertificateEntryRef, CertificateRef};
 pub use crate::handshake::certificate_verify::CertificateVerifyRef;
 use aes_gcm::{AeadInPlace, Aes128Gcm, Aes256Gcm, KeyInit};
+#[cfg(feature = "chacha20poly1305")]
+use chacha20poly1305::ChaCha20Poly1305;
 use digest::core_api::BlockSizeUser;
 use digest::{Digest, FixedOutput, OutputSizeUser, Reset};
 use ecdsa::elliptic_curve::SecretKey;
@@ -59,6 +61,19 @@ impl TlsCipherSuite for Aes256GcmSha384 {
     type IvLen = U12;
 
     type Hash = Sha384;
+    type LabelBufferSize = LabelBuffer<Self>;
+}
+
+#[cfg(feature = "chacha20poly1305")]
+pub struct Chacha20Poly1305Sha256;
+#[cfg(feature = "chacha20poly1305")]
+impl TlsCipherSuite for Chacha20Poly1305Sha256 {
+    const CODE_POINT: u16 = CipherSuite::TlsChacha20Poly1305Sha256 as u16;
+    type Cipher = ChaCha20Poly1305;
+    type KeyLen = U32;
+    type IvLen = U12;
+
+    type Hash = Sha256;
     type LabelBufferSize = LabelBuffer<Self>;
 }
 
@@ -315,6 +330,7 @@ impl<'a> TlsConfig<'a> {
                 .ok()
         );
         unwrap!(config.signature_schemes.push(SignatureScheme::Ed25519).ok());
+        unwrap!(config.signature_schemes.push(SignatureScheme::Ed448).ok());
 
         unwrap!(config.named_groups.push(NamedGroup::Secp256r1));
 

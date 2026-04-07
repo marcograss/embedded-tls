@@ -4,6 +4,8 @@ use crate::config::{Certificate, TlsCipherSuite, TlsClock, TlsVerifier};
 use crate::der_certificate::ECDSA_SHA384;
 #[cfg(feature = "ed25519")]
 use crate::der_certificate::ED25519;
+#[cfg(feature = "ed448")]
+use crate::der_certificate::ED448;
 use crate::der_certificate::{
     DecodedCertificate, ECDSA_SHA256, HOSTNAME_MAXLEN, MAX_SAN_DNS_NAMES, Time,
     extract_common_name, extract_san_dns_names,
@@ -199,6 +201,19 @@ fn verify_signature(
                 Signature::try_from(verify.signature).map_err(|_| TlsError::DecodeError)?;
             verified = verifying_key.verify(message, &signature).is_ok();
         }
+        #[cfg(feature = "ed448")]
+        SignatureScheme::Ed448 => {
+            use ed448_goldilocks::Signature as Ed448Signature;
+            use ed448_goldilocks::VerifyingKey as Ed448VerifyingKey;
+            use ed448_goldilocks::signature::Verifier;
+            let verifying_key: Ed448VerifyingKey =
+                Ed448VerifyingKey::from_bytes(
+                    public_key.try_into().map_err(|_| TlsError::DecodeError)?
+                ).map_err(|_| TlsError::DecodeError)?;
+            let signature = Ed448Signature::try_from(verify.signature)
+                .map_err(|_| TlsError::DecodeError)?;
+            verified = verifying_key.verify(message, &signature).is_ok();
+        }
         #[cfg(feature = "rsa")]
         SignatureScheme::RsaPssRsaeSha256 => {
             use rsa::{
@@ -373,6 +388,27 @@ fn verify_certificate(
                         .map_err(|_| TlsError::DecodeError)?;
 
                 let signature = Signature::try_from(
+                    parsed_certificate
+                        .signature
+                        .as_bytes()
+                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
+                )
+                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
+
+                verified = verifying_key.verify(certificate_data, &signature).is_ok();
+            }
+            #[cfg(feature = "ed448")]
+            ED448 => {
+                use ed448_goldilocks::{
+                    Signature as Ed448Signature, VerifyingKey as Ed448VerifyingKey,
+                };
+                use ed448_goldilocks::signature::Verifier;
+                let verifying_key: Ed448VerifyingKey =
+                    Ed448VerifyingKey::from_bytes(
+                        ca_public_key.try_into().map_err(|_| TlsError::DecodeError)?
+                    ).map_err(|_| TlsError::DecodeError)?;
+
+                let signature = Ed448Signature::try_from(
                     parsed_certificate
                         .signature
                         .as_bytes()

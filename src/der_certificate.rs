@@ -42,6 +42,11 @@ pub const ED25519: AlgorithmIdentifier = AlgorithmIdentifier {
     oid: ObjectIdentifier::new_unwrap("1.3.101.112"),
     parameters: None,
 };
+#[cfg(feature = "ed448")]
+pub const ED448: AlgorithmIdentifier = AlgorithmIdentifier {
+    oid: ObjectIdentifier::new_unwrap("1.3.101.113"),
+    parameters: None,
+};
 #[cfg(feature = "rsa")]
 pub const RSA_PKCS1_SHA256: AlgorithmIdentifier = AlgorithmIdentifier {
     oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
