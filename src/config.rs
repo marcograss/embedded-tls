@@ -129,13 +129,28 @@ where
     }
 }
 
+/// Pre-shared-key variant. Determines which `binder_label` is used in
+/// the early-secret derivation (RFC 8446 §4.2.11):
+///
+/// * `External` → `"ext binder"` — application-supplied PSKs (e.g. via
+///   out-of-band exchange, EAP-TLS).
+/// * `Resumption` → `"res binder"` — PSKs derived from a previous
+///   session's `resumption_master_secret` + `NewSessionTicket` nonce
+///   (RFC 8446 §7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum PskType {
+    External,
+    Resumption,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[must_use = "TlsConfig does nothing unless consumed"]
 pub struct TlsConfig<'a> {
     pub(crate) server_name: Option<&'a str>,
     pub(crate) alpn_protocols: Option<&'a [&'a [u8]]>,
-    pub(crate) psk: Option<(&'a [u8], Vec<&'a [u8], 4>)>,
+    pub(crate) psk: Option<(&'a [u8], Vec<&'a [u8], 4>, PskType)>,
     pub(crate) signature_schemes: Vec<SignatureScheme, 25>,
     pub(crate) named_groups: Vec<NamedGroup, 13>,
     pub(crate) max_fragment_length: Option<MaxFragmentLength>,
@@ -418,9 +433,31 @@ impl<'a> TlsConfig<'a> {
         self
     }
 
+    /// Configure an *external* PSK (RFC 8446 §4.2.11 binder label
+    /// `"ext binder"`). For resumption PSKs derived from a previous
+    /// session's `NewSessionTicket`, use [`Self::with_psk_resumption`].
     pub fn with_psk(mut self, psk: &'a [u8], identities: &[&'a [u8]]) -> Self {
         // TODO: Remove potential panic
-        self.psk = Some((psk, unwrap!(Vec::from_slice(identities).ok())));
+        self.psk = Some((
+            psk,
+            unwrap!(Vec::from_slice(identities).ok()),
+            PskType::External,
+        ));
+        self
+    }
+
+    /// Configure a *resumption* PSK derived from a previous session's
+    /// `NewSessionTicket` (RFC 8446 §7.1). Differs from
+    /// [`Self::with_psk`] only in the early-secret binder label used by
+    /// the handshake (`"res binder"` vs `"ext binder"`); strict TLS 1.3
+    /// servers (rustls, OpenSSL, Haskell-tls) reject the wrong-type
+    /// binder.
+    pub fn with_psk_resumption(mut self, psk: &'a [u8], identities: &[&'a [u8]]) -> Self {
+        self.psk = Some((
+            psk,
+            unwrap!(Vec::from_slice(identities).ok()),
+            PskType::Resumption,
+        ));
         self
     }
 }

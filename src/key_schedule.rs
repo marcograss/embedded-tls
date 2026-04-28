@@ -1,6 +1,9 @@
 use crate::handshake::binder::PskBinder;
 use crate::handshake::finished::Finished;
-use crate::{TlsError, config::TlsCipherSuite};
+use crate::{
+    TlsError,
+    config::{PskType, TlsCipherSuite},
+};
 use digest::OutputSizeUser;
 use digest::generic_array::ArrayLength;
 use hmac::{Mac, SimpleHmac};
@@ -52,18 +55,18 @@ where
         let mut hkdf_label = heapless_typenum::Vec::<u8, LabelBufferSize<CipherSuite>>::new();
         hkdf_label
             .extend_from_slice(&N::to_u16().to_be_bytes())
-            .map_err(|()| TlsError::InternalError)?;
+            .map_err(|_| TlsError::InternalError)?;
 
         let label_len = 6 + label.len() as u8;
         hkdf_label
             .extend_from_slice(&label_len.to_be_bytes())
-            .map_err(|()| TlsError::InternalError)?;
+            .map_err(|_| TlsError::InternalError)?;
         hkdf_label
             .extend_from_slice(b"tls13 ")
-            .map_err(|()| TlsError::InternalError)?;
+            .map_err(|_| TlsError::InternalError)?;
         hkdf_label
             .extend_from_slice(label)
-            .map_err(|()| TlsError::InternalError)?;
+            .map_err(|_| TlsError::InternalError)?;
 
         match context_type {
             ContextType::None => {
@@ -72,10 +75,10 @@ where
             ContextType::Hash(context) => {
                 hkdf_label
                     .extend_from_slice(&(context.len() as u8).to_be_bytes())
-                    .map_err(|()| TlsError::InternalError)?;
+                    .map_err(|_| TlsError::InternalError)?;
                 hkdf_label
                     .extend_from_slice(&context)
-                    .map_err(|()| TlsError::InternalError)?;
+                    .map_err(|_| TlsError::InternalError)?;
             }
         }
 
@@ -241,8 +244,26 @@ where
             server_state: ReadKeySchedule {
                 state: KeyScheduleState::new(),
                 transcript_hash: <CipherSuite::Hash as Digest>::new(),
+                resumption_secret: Secret::Uninitialized,
             },
         }
+    }
+
+    /// Derive the resumption_master_secret per RFC 8446 §7.1 and store it on
+    /// the read state. Must be called *after* `initialize_master_secret()` —
+    /// it uses `self.shared.hkdf` (= master_secret) — and with
+    /// `client_finished_transcript` = Hash(ClientHello..ClientFinished).
+    pub(crate) fn derive_resumption_master_secret(
+        &mut self,
+        client_finished_transcript: &CipherSuite::Hash,
+    ) -> Result<(), TlsError> {
+        let secret = self.shared.derive_secret(
+            b"res master",
+            ContextType::transcript_hash(client_finished_transcript),
+        )?;
+        let hkdf = Hkdf::<CipherSuite>::from_prk(&secret).map_err(|_| TlsError::InternalError)?;
+        self.server_state.resumption_secret.replace(hkdf);
+        Ok(())
     }
 
     pub(crate) fn transcript_hash(&mut self) -> &mut CipherSuite::Hash {
@@ -334,16 +355,33 @@ where
         GenericArray::default()
     }
 
-    // Initializes the early secrets with a callback for any PSK binders
-    pub fn initialize_early_secret(&mut self, psk: Option<&[u8]>) -> Result<(), TlsError> {
+    // Initializes the early secrets with a callback for any PSK binders.
+    // `psk` carries the optional PSK bytes plus the binder label (RFC
+    // 8446 §4.2.11) — `"ext binder"` for external PSKs, `"res binder"`
+    // for resumption PSKs derived from a prior NewSessionTicket.
+    pub fn initialize_early_secret(
+        &mut self,
+        psk: Option<(&[u8], PskType)>,
+    ) -> Result<(), TlsError> {
+        let (psk_bytes, psk_type) = match psk {
+            Some((b, t)) => (Some(b), t),
+            // No PSK → label is irrelevant (binder won't be sent), but
+            // we still derive `binder_key` deterministically over the
+            // zero-PSK Early Secret.
+            None => (None, PskType::External),
+        };
         self.shared.initialize(
             #[allow(clippy::or_fun_call)]
-            psk.unwrap_or(Self::zero().as_slice()),
+            psk_bytes.unwrap_or(Self::zero().as_slice()),
         );
 
+        let binder_label: &[u8] = match psk_type {
+            PskType::External => b"ext binder",
+            PskType::Resumption => b"res binder",
+        };
         let binder_key = self
             .shared
-            .derive_secret(b"ext binder", ContextType::empty_hash())?;
+            .derive_secret(binder_label, ContextType::empty_hash())?;
         self.client_state.binder_key.replace(
             Hkdf::<CipherSuite>::from_prk(&binder_key).map_err(|_| TlsError::InternalError)?,
         );
@@ -445,6 +483,7 @@ where
 {
     state: KeyScheduleState<CipherSuite>,
     transcript_hash: CipherSuite::Hash,
+    resumption_secret: Secret<CipherSuite>,
 }
 
 impl<CipherSuite> ReadKeySchedule<CipherSuite>
@@ -453,6 +492,74 @@ where
 {
     pub(crate) fn increment_counter(&mut self) {
         self.state.increment_counter();
+    }
+
+    /// Whether `derive_resumption_master_secret` has run on the parent
+    /// `KeySchedule`. Once true, `derive_psk_for_ticket` may be called.
+    pub fn has_resumption_secret(&self) -> bool {
+        matches!(self.resumption_secret, Secret::Initialized(_))
+    }
+
+    /// Derive the per-ticket PSK from the resumption_master_secret using the
+    /// NewSessionTicket nonce, per RFC 8446 §4.6.1:
+    ///
+    /// ```text
+    /// PSK = HKDF-Expand-Label(resumption_master_secret,
+    ///                         "resumption", ticket_nonce, Hash.length)
+    /// ```
+    ///
+    /// The HkdfLabel context here is variable-length (≤255 bytes per RFC
+    /// 8446 §4.6.1), so the standard `make_expanded_hkdf_label` (sized for
+    /// hash-output contexts) is bypassed in favour of a slightly larger
+    /// inline buffer.
+    pub fn derive_psk_for_ticket(
+        &self,
+        nonce: &[u8],
+    ) -> Result<HashArray<CipherSuite>, TlsError> {
+        // Reject oversize nonces up front — the HkdfLabel context length is u8.
+        if nonce.len() > u8::MAX as usize {
+            return Err(TlsError::InternalError);
+        }
+
+        let hkdf = match &self.resumption_secret {
+            Secret::Initialized(h) => h,
+            Secret::Uninitialized => return Err(TlsError::InternalError),
+        };
+
+        // Worst-case HkdfLabel size:
+        //   2 (Length) + 1 (label_len) + 6 ("tls13 ") + 10 ("resumption")
+        //                                              + 1 (ctx_len) + 255 (ctx)
+        //   = 275 bytes
+        let mut hkdf_label = heapless::Vec::<u8, 320>::new();
+
+        let n = HashOutputSize::<CipherSuite>::to_u16();
+        hkdf_label
+            .extend_from_slice(&n.to_be_bytes())
+            .map_err(|_| TlsError::InternalError)?;
+
+        let label = b"resumption";
+        let label_len = (6 + label.len()) as u8;
+        hkdf_label
+            .push(label_len)
+            .map_err(|_| TlsError::InternalError)?;
+        hkdf_label
+            .extend_from_slice(b"tls13 ")
+            .map_err(|_| TlsError::InternalError)?;
+        hkdf_label
+            .extend_from_slice(label)
+            .map_err(|_| TlsError::InternalError)?;
+
+        hkdf_label
+            .push(nonce.len() as u8)
+            .map_err(|_| TlsError::InternalError)?;
+        hkdf_label
+            .extend_from_slice(nonce)
+            .map_err(|_| TlsError::InternalError)?;
+
+        let mut okm = GenericArray::default();
+        hkdf.expand(&hkdf_label, &mut okm)
+            .map_err(|_| TlsError::CryptoError)?;
+        Ok(okm)
     }
 
     pub(crate) fn transcript_hash(&mut self) -> &mut CipherSuite::Hash {

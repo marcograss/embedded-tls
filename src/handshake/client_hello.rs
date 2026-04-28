@@ -128,7 +128,7 @@ where
                 .encode(buf)?;
             }
 
-            if let Some((_, identities)) = &self.config.psk {
+            if let Some((_, identities, _)) = &self.config.psk {
                 ClientHelloExtension::PreSharedKey(PreSharedKeyClientHello {
                     identities: identities.clone(),
                     hash_size: <CipherSuite::Hash as OutputSizeUser>::output_size(),
@@ -148,7 +148,7 @@ where
         transcript: &mut CipherSuite::Hash,
         write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
     ) -> Result<(), TlsError> {
-        if let Some((_, identities)) = &self.config.psk {
+        if let Some((_, identities, _)) = &self.config.psk {
             let binders_len = identities.len() * (1 + HashOutputSize::<CipherSuite>::to_usize());
 
             let binders_pos = enc_buf.len() - binders_len;

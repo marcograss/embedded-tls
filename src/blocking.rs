@@ -15,6 +15,9 @@ use embedded_io::{BufRead, ErrorType, Read, Write};
 use portable_atomic::AtomicBool;
 
 pub use crate::TlsError;
+pub use crate::common::session_ticket::{
+    MAX_PSK_LEN, MAX_TICKET_LEN, MAX_TICKET_NONCE_LEN, SessionTicket,
+};
 pub use crate::config::*;
 
 /// Type representing a TLS connection. An instance of this type can
@@ -32,6 +35,9 @@ where
     record_write_buf: WriteBuffer<'a>,
     decrypted: DecryptedBufferInfo,
     flush_policy: FlushPolicy,
+    /// Slot for the most recent server-issued NewSessionTicket; drained via
+    /// [`Self::take_session_ticket`].
+    session_ticket: Option<SessionTicket>,
 }
 
 impl<'a, Socket, CipherSuite> TlsConnection<'a, Socket, CipherSuite>
@@ -67,7 +73,14 @@ where
             record_write_buf: WriteBuffer::new(record_write_buf),
             decrypted: DecryptedBufferInfo::default(),
             flush_policy: FlushPolicy::default(),
+            session_ticket: None,
         }
+    }
+
+    /// Drain the most recent server-issued NewSessionTicket, if any. See
+    /// [`crate::TlsConnection::take_session_ticket`] (async) for full details.
+    pub fn take_session_ticket(&mut self) -> Option<SessionTicket> {
+        self.session_ticket.take()
     }
 
     /// Returns a reference to the current flush policy.
@@ -222,9 +235,10 @@ where
             source_buffer: buf_ptr_range,
             buffer_info: &mut self.decrypted,
             is_open: self.opened.get_mut(),
+            session_ticket_slot: Some(&mut self.session_ticket),
         };
-        decrypt_record(key_schedule, record, |_key_schedule, record| {
-            handler.handle(record)
+        decrypt_record(key_schedule, record, |key_schedule, record| {
+            handler.handle(key_schedule, record)
         })?;
 
         Ok(())
@@ -277,6 +291,7 @@ where
             key_schedule: rks,
             record_reader: self.record_reader.reborrow_mut(),
             decrypted: &mut self.decrypted,
+            session_ticket: &mut self.session_ticket,
         };
         let writer = TlsWriter {
             opened: &self.opened,
@@ -345,6 +360,8 @@ where
     key_schedule: &'a mut ReadKeySchedule<CipherSuite>,
     record_reader: RecordReaderBorrowMut<'a>,
     decrypted: &'a mut DecryptedBufferInfo,
+    /// Reborrow of the parent connection's session-ticket slot.
+    session_ticket: &'a mut Option<SessionTicket>,
 }
 
 impl<Socket, CipherSuite> AsRef<Socket> for TlsReader<'_, Socket, CipherSuite>
@@ -389,9 +406,10 @@ where
             source_buffer: buf_ptr_range,
             buffer_info: self.decrypted,
             is_open: &mut opened,
+            session_ticket_slot: Some(self.session_ticket),
         };
-        let result = decrypt_record(self.key_schedule, record, |_key_schedule, record| {
-            handler.handle(record)
+        let result = decrypt_record(self.key_schedule, record, |key_schedule, record| {
+            handler.handle(key_schedule, record)
         });
 
         if !opened {

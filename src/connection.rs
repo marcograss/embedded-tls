@@ -394,7 +394,7 @@ fn client_hello<'r, Provider>(
 where
     Provider: CryptoProvider,
 {
-    key_schedule.initialize_early_secret(config.psk.as_ref().map(|p| p.0))?;
+    key_schedule.initialize_early_secret(config.psk.as_ref().map(|p| (p.0, p.2)))?;
     let (write_key_schedule, read_key_schedule) = key_schedule.as_split();
     let client_hello = ClientRecord::client_hello(config, crypto_provider);
     let slice = tx_buf.write_record(&client_hello, write_key_schedule, Some(read_key_schedule))?;
@@ -624,6 +624,12 @@ fn client_finished_finalize<CipherSuite>(
 where
     CipherSuite: TlsCipherSuite,
 {
+    // Snapshot the transcript hash at end of client Finished — needed for the
+    // resumption_master_secret derivation per RFC 8446 §7.1, since the next
+    // step rolls the transcript back to "at server Finished" so traffic
+    // secrets are derived under the correct hash.
+    let client_finished_transcript = key_schedule.transcript_hash().clone();
+
     key_schedule.replace_transcript_hash(
         handshake
             .traffic_hash
@@ -631,6 +637,7 @@ where
             .ok_or(TlsError::InvalidHandshake)?,
     );
     key_schedule.initialize_master_secret()?;
+    key_schedule.derive_resumption_master_secret(&client_finished_transcript)?;
 
     Ok(State::ApplicationData)
 }
